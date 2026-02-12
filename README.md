@@ -119,7 +119,29 @@ EXTRA_OPTIONS="0x00030100110100000000000000000000000000030d40"
 - 简单转账: `200,000` = `0x030d40`
 - 复杂交互: `500,000` = `0x07a120`
 
-### Step 5: 估算跨链费用
+### Step 5: 查询 OFT 配置（可选）
+
+```bash
+# 查询目标链的对等合约地址
+cast call $USDT0 \
+  "peers(uint32)(bytes32)" \
+  110 \
+  --rpc-url $POLYGON_RPC
+
+# 输出示例: 0x000000000000000000000000f7c260136176100ce2a4faf70045d3a0fb6fb86e
+# 这是 Arbitrum 上的 USDT0 地址
+
+# 使用 quoteOFT 查询详细信息
+cast call $USDT0 \
+  "quoteOFT((uint32,bytes32,uint256,uint256,bytes,bytes,bytes))(uint256,uint256)" \
+  "(110,$MY_ADDRESS_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
+  --rpc-url $POLYGON_RPC
+
+# 输出: (剩余金额, 接收金额)
+# 用于验证是否有手续费扣除
+```
+
+### Step 6: 估算跨链费用
 
 ```bash
 # 调用 quoteSend 查询费用
@@ -147,7 +169,7 @@ echo "Native Fee: $NATIVE_FEE wei"
 echo "Native Fee in POL: $(cast --from-wei $NATIVE_FEE)"
 ```
 
-### Step 6: 发送跨链交易
+### Step 7: 发送跨链交易
 
 ```bash
 cast send $USDT0 \
@@ -169,7 +191,7 @@ transactionHash         0xabcd...
 status                  1 (success)
 ```
 
-### Step 7: 跟踪消息状态
+### Step 8: 跟踪消息状态
 
 访问 [LayerZero Scan](https://layerzeroscan.com/)，输入交易哈希：
 
@@ -417,6 +439,30 @@ cast call $USDT0 \
   --rpc-url $POLYGON_RPC
 
 # 输出应该匹配 USDT0 在 Arbitrum 的地址
+```
+
+### Q7: quoteOFT 和 quoteSend 有什么区别？
+A: 
+- **quoteOFT**: 查询跨链后的代币分配（是否有手续费扣除）
+  - 输出: (剩余金额, 接收金额)
+  - 用于验证跨链是否会扣除费用
+- **quoteSend**: 查询跨链所需的 LayerZero 费用
+  - 输出: (nativeFee, lzTokenFee)
+  - 用于确定需要支付多少原生代币
+
+```bash
+# quoteOFT - 查询代币分配
+cast call $USDT0 \
+  "quoteOFT((uint32,bytes32,uint256,uint256,bytes,bytes,bytes))(uint256,uint256)" \
+  "(110,$MY_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
+  --rpc-url $POLYGON_RPC
+
+# quoteSend - 查询 LayerZero 费用
+cast call $USDT0 \
+  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)(uint256,uint256)" \
+  "(110,$MY_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
+  false \
+  --rpc-url $POLYGON_RPC
 ```
 
 ---
