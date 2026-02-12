@@ -29,7 +29,9 @@ ARBITRUM_RPC="https://arb1.arbitrum.io/rpc"
 
 ---
 
-## 2. SendParam 结构
+## 2. 数据结构
+
+### SendParam 结构
 
 ```solidity
 struct SendParam {
@@ -43,9 +45,43 @@ struct SendParam {
 }
 ```
 
+### MessagingFee 结构
+
+```solidity
+struct MessagingFee {
+    uint256 nativeFee;      // 原生代币费用（如 POL）
+    uint256 lzTokenFee;     // ZRO token 费用（通常为 0）
+}
+```
+
 ---
 
-## 3. 步骤详解
+## 3. 核心函数签名
+
+```solidity
+// 查询对等合约地址
+function peers(uint32 eid) external view returns (bytes32 peer);
+
+// 查询费用
+function quoteSend(
+    SendParam calldata _sendParam,
+    bool _payInLzToken
+) external view returns (MessagingFee memory fee);
+
+// 发送跨链交易
+function send(
+    SendParam calldata _sendParam,
+    MessagingFee calldata _fee,
+    address _refundAddress
+) external payable returns (
+    MessagingReceipt memory msgReceipt,
+    OFTReceipt memory oftReceipt
+);
+```
+
+---
+
+## 4. 步骤详解
 
 ### Step 0: 设置环境变量
 
@@ -83,7 +119,7 @@ cast call $USDT0 \
 cast send $USDT0 \
   "approve(address,uint256)" \
   $USDT0 \
-  115792089237316195423570985008687907853269984665640564039457584007913129639935 \
+  $(cast max-uint) \
   --private-key $PRIVATE_KEY \
   --rpc-url $POLYGON_RPC
 ```
@@ -108,21 +144,14 @@ LayerZero 使用紧凑的 hex 编码设置 Gas：
 EXTRA_OPTIONS="0x00030100110100000000000000000000000000030d40"
 ```
 
-**方式 2: 使用 cast**
-```bash
-# Type 3 Option, Gas Limit = 200000
-# 格式: 0x0003 (type) + 0101 (option type) + 0011 (length 17) + 01 (type) + 00000000000000000000000000030d40 (gas)
-EXTRA_OPTIONS="0x00030100110100000000000000000000000000030d40"
-```
-
 **常用 Gas 设置**：
 - 简单转账: `200,000` = `0x030d40`
 - 复杂交互: `500,000` = `0x07a120`
 
-### Step 5: 查询 OFT 配置（可选）
+### Step 5: 查询对等合约（可选）
 
 ```bash
-# 查询目标链的对等合约地址
+# 查询 Arbitrum 上的对等合约地址
 cast call $USDT0 \
   "peers(uint32)(bytes32)" \
   110 \
@@ -130,40 +159,44 @@ cast call $USDT0 \
 
 # 输出示例: 0x000000000000000000000000f7c260136176100ce2a4faf70045d3a0fb6fb86e
 # 这是 Arbitrum 上的 USDT0 地址
-
-# 使用 quoteOFT 查询详细信息
-cast call $USDT0 \
-  "quoteOFT((uint32,bytes32,uint256,uint256,bytes,bytes,bytes))(uint256,uint256)" \
-  "(110,$MY_ADDRESS_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
-  --rpc-url $POLYGON_RPC
-
-# 输出: (剩余金额, 接收金额)
-# 用于验证是否有手续费扣除
 ```
 
 ### Step 6: 估算跨链费用
 
+**函数签名**:
+```solidity
+function quoteSend(
+    SendParam calldata _sendParam,
+    bool _payInLzToken
+) external view returns (MessagingFee memory)
+```
+
+**Cast 调用**:
 ```bash
 # 调用 quoteSend 查询费用
+# 返回值是 MessagingFee struct: (nativeFee, lzTokenFee)
 cast call $USDT0 \
-  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)(uint256,uint256)" \
+  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)((uint256,uint256))" \
   "(110,$MY_ADDRESS_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
   false \
   --rpc-url $POLYGON_RPC
 
-# 输出示例: (500000000000000000, 0)
-# 第一个值 = 0.5 POL (nativeFee)
-# 第二个值 = 0 (lzTokenFee，不使用 ZRO token)
+# 输出示例: ((500000000000000000,0))
+# nativeFee = 500000000000000000 (0.5 POL)
+# lzTokenFee = 0
 ```
 
-**保存费用到变量**：
+**提取 nativeFee**:
 ```bash
-# 使用 awk 提取 nativeFee
-NATIVE_FEE=$(cast call $USDT0 \
-  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)(uint256,uint256)" \
+# 使用 awk 提取第一个值（nativeFee）
+RESULT=$(cast call $USDT0 \
+  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)((uint256,uint256))" \
   "(110,$MY_ADDRESS_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
   false \
-  --rpc-url $POLYGON_RPC | awk -F'[(),]' '{print $2}')
+  --rpc-url $POLYGON_RPC)
+
+# 移除外层括号和内层括号，提取第一个数字
+NATIVE_FEE=$(echo $RESULT | sed 's/((//;s/))//' | awk -F',' '{print $1}')
 
 echo "Native Fee: $NATIVE_FEE wei"
 echo "Native Fee in POL: $(cast --from-wei $NATIVE_FEE)"
@@ -171,6 +204,16 @@ echo "Native Fee in POL: $(cast --from-wei $NATIVE_FEE)"
 
 ### Step 7: 发送跨链交易
 
+**函数签名**:
+```solidity
+function send(
+    SendParam calldata _sendParam,
+    MessagingFee calldata _fee,
+    address _refundAddress
+) external payable returns (MessagingReceipt, OFTReceipt)
+```
+
+**Cast 调用**:
 ```bash
 cast send $USDT0 \
   "send((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),(uint256,uint256),address)" \
@@ -209,7 +252,7 @@ curl -s "https://api-mainnet.layerzero-scan.com/tx/$TX_HASH" | jq '.'
 
 ---
 
-## 4. 完整一键脚本
+## 5. 完整一键脚本
 
 将以下命令保存为 `bridge-usdt0.sh`：
 
@@ -231,11 +274,13 @@ EXTRA_OPTIONS="0x00030100110100000000000000000000000000030d40"
 
 # ========== 估算费用 ==========
 echo "📊 估算跨链费用..."
-NATIVE_FEE=$(cast call $USDT0 \
-  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)(uint256,uint256)" \
+RESULT=$(cast call $USDT0 \
+  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)((uint256,uint256))" \
   "($DST_EID,$MY_ADDRESS_BYTES32,$AMOUNT,$AMOUNT,$EXTRA_OPTIONS,0x,0x)" \
   false \
-  --rpc-url $POLYGON_RPC | awk -F'[(),]' '{print $2}')
+  --rpc-url $POLYGON_RPC)
+
+NATIVE_FEE=$(echo $RESULT | sed 's/((//;s/))//' | awk -F',' '{print $1}')
 
 echo "💰 Native Fee: $(cast --from-wei $NATIVE_FEE) POL"
 
@@ -264,7 +309,7 @@ chmod +x bridge-usdt0.sh
 
 ---
 
-## 5. 参数说明
+## 6. 参数说明
 
 ### SendParam 各字段
 
@@ -287,7 +332,7 @@ chmod +x bridge-usdt0.sh
 
 ---
 
-## 6. extraOptions 详解
+## 7. extraOptions 详解
 
 LayerZero 使用紧凑的二进制编码：
 
@@ -313,7 +358,7 @@ EXTRA_OPTIONS="0x00030100110100000000000000000000000000f4240"
 
 ---
 
-## 7. Cast 常用命令
+## 8. Cast 常用命令
 
 ### 地址工具
 ```bash
@@ -325,6 +370,9 @@ cast --to-checksum-address 0xabcdef...
 
 # 生成随机地址
 cast wallet new
+
+# 获取最大 uint256
+cast max-uint
 ```
 
 ### 单位转换
@@ -375,7 +423,7 @@ cast block <BLOCK_NUMBER> --rpc-url <RPC>
 
 ---
 
-## 8. LayerZero Endpoint IDs
+## 9. LayerZero Endpoint IDs
 
 | 链 | EID | RPC |
 |----|-----|-----|
@@ -391,7 +439,7 @@ cast block <BLOCK_NUMBER> --rpc-url <RPC>
 
 ---
 
-## 9. 费用参考
+## 10. 费用参考
 
 **Polygon → Arbitrum**：
 - LayerZero 费用: ~0.3-0.8 POL
@@ -405,7 +453,7 @@ cast block <BLOCK_NUMBER> --rpc-url <RPC>
 
 ---
 
-## 10. 常见问题
+## 11. 常见问题
 
 ### Q1: 如何查看跨链进度？
 A: 访问 [LayerZero Scan](https://layerzeroscan.com/)，输入交易哈希。通常 30-120 秒完成。
@@ -441,33 +489,9 @@ cast call $USDT0 \
 # 输出应该匹配 USDT0 在 Arbitrum 的地址
 ```
 
-### Q7: quoteOFT 和 quoteSend 有什么区别？
-A: 
-- **quoteOFT**: 查询跨链后的代币分配（是否有手续费扣除）
-  - 输出: (剩余金额, 接收金额)
-  - 用于验证跨链是否会扣除费用
-- **quoteSend**: 查询跨链所需的 LayerZero 费用
-  - 输出: (nativeFee, lzTokenFee)
-  - 用于确定需要支付多少原生代币
-
-```bash
-# quoteOFT - 查询代币分配
-cast call $USDT0 \
-  "quoteOFT((uint32,bytes32,uint256,uint256,bytes,bytes,bytes))(uint256,uint256)" \
-  "(110,$MY_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
-  --rpc-url $POLYGON_RPC
-
-# quoteSend - 查询 LayerZero 费用
-cast call $USDT0 \
-  "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)(uint256,uint256)" \
-  "(110,$MY_BYTES32,3000000,3000000,$EXTRA_OPTIONS,0x,0x)" \
-  false \
-  --rpc-url $POLYGON_RPC
-```
-
 ---
 
-## 11. 安全提示
+## 12. 安全提示
 
 ⚠️ **重要**：
 1. **永远不要分享私钥** - 使用环境变量 `$PRIVATE_KEY`，不要硬编码
@@ -479,7 +503,7 @@ cast call $USDT0 \
 
 ---
 
-## 12. 调试技巧
+## 13. 调试技巧
 
 ### 查看调用数据
 ```bash
@@ -517,7 +541,7 @@ cast estimate $USDT0 \
 
 ---
 
-## 13. 相关链接
+## 14. 相关链接
 
 - **LayerZero V2 Docs**: https://docs.layerzero.network/v2
 - **LayerZero Scan**: https://layerzeroscan.com/
@@ -528,7 +552,7 @@ cast estimate $USDT0 \
 
 ---
 
-## 14. 快速参考卡
+## 15. 快速参考卡
 
 ```bash
 # 环境变量
@@ -547,7 +571,8 @@ cast send $USDT0 "approve(address,uint256)" $USDT0 $(cast max-uint) --private-ke
 MY_BYTES32=$(cast --to-bytes32 $MY_ADDRESS)
 
 # 估算费用
-NATIVE_FEE=$(cast call $USDT0 "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)(uint256,uint256)" "(110,$MY_BYTES32,3000000,3000000,0x00030100110100000000000000000000000000030d40,0x,0x)" false --rpc-url $POLYGON_RPC | awk -F'[(),]' '{print $2}')
+RESULT=$(cast call $USDT0 "quoteSend((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),bool)((uint256,uint256))" "(110,$MY_BYTES32,3000000,3000000,0x00030100110100000000000000000000000000030d40,0x,0x)" false --rpc-url $POLYGON_RPC)
+NATIVE_FEE=$(echo $RESULT | sed 's/((//;s/))//' | awk -F',' '{print $1}')
 
 # 发送
 cast send $USDT0 "send((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),(uint256,uint256),address)" "(110,$MY_BYTES32,3000000,3000000,0x00030100110100000000000000000000000000030d40,0x,0x)" "($NATIVE_FEE,0)" "$MY_ADDRESS" --value $NATIVE_FEE --private-key $PRIVATE_KEY --rpc-url $POLYGON_RPC --legacy
@@ -558,4 +583,4 @@ cast send $USDT0 "send((uint32,bytes32,uint256,uint256,bytes,bytes,bytes),(uint2
 **作者**: 汤圆 ⚪  
 **更新**: 2026-02-12  
 **工具**: Foundry Cast + curl  
-**版本**: 1.0 - CLI Edition
+**版本**: 2.0 - 修正函数签名
